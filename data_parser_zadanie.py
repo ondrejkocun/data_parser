@@ -1,8 +1,9 @@
 import argparse
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 import requests
@@ -148,14 +149,65 @@ class GenericFlyerScraper:
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Generic flyer parser")
-    parser.add_argument("--url", default=ScraperConfig.base_url)
-    parser.add_argument("--output", default=ScraperConfig.output_file)
+    parser.add_argument("--config", help="Path to JSON/YAML file with ScraperConfig values")
+    parser.add_argument("--url")
+    parser.add_argument("--output")
     return parser.parse_args()
+
+
+def load_config_from_file(config_path: str) -> dict:
+    path = Path(config_path)
+    file_content = path.read_text(encoding="utf-8")
+    suffix = path.suffix.lower()
+
+    if suffix == ".json":
+        config_data = json.loads(file_content)
+    elif suffix in {".yaml", ".yml"}:
+        try:
+            import yaml
+        except ImportError as exc:
+            raise ValueError(
+                "YAML config requires PyYAML. Install it or use JSON config."
+            ) from exc
+        config_data = yaml.safe_load(file_content)
+    else:
+        raise ValueError("Unsupported config format. Use .json, .yaml, or .yml")
+
+    if config_data is None:
+        return {}
+    if not isinstance(config_data, dict):
+        raise ValueError("Config file must contain an object/dictionary at top level")
+    return config_data
+
+
+def build_config(args) -> ScraperConfig:
+    config_values = {}
+    if args.config:
+        config_values = load_config_from_file(args.config)
+
+    allowed_fields = {field.name for field in fields(ScraperConfig)}
+    unknown_fields = sorted(set(config_values) - allowed_fields)
+    if unknown_fields:
+        unknown = ", ".join(unknown_fields)
+        raise ValueError(f"Unknown config keys: {unknown}")
+
+    merged_config = {field.name: getattr(ScraperConfig(), field.name) for field in fields(ScraperConfig)}
+    merged_config.update(config_values)
+
+    if args.url:
+        merged_config["base_url"] = args.url
+    if args.output:
+        merged_config["output_file"] = args.output
+
+    return ScraperConfig(**merged_config)
 
 
 if __name__ == "__main__":
     args = parse_args()
-    scraper = GenericFlyerScraper(
-        ScraperConfig(base_url=args.url, output_file=args.output)
-    )
+    try:
+        config = build_config(args)
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        raise SystemExit(f"Configuration error: {exc}")
+
+    scraper = GenericFlyerScraper(config)
     scraper.run()
